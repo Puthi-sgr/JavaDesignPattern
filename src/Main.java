@@ -1,24 +1,33 @@
 import jdk.jfr.TransitionFrom;
 
-//TIP To <b>Run</b> code, press <shortcut actionId="Run"/> or
-// click the <icon src="AllIcons.Actions.Execute"/> icon in the gutter.
+import javax.xml.crypto.dsig.Transform;
+
+
 void main() {
-//We need an exporter
-    //The consumer will have two options to consume two different types of exporters
-    //1. We will need a contract interface that both exporters will implement
-    //2. We will need an abstract class that will have custom hooks and packaged algorithm
-    //3. The concrete class will extend the abstract but have to override the abstract methods
-    //4. The consumer will use the abstract class reference to point to concrete class object
+
+    TransformDecorator loggingDecorator = new LoggingTransformDecorator(new JsonExportAxis());
     new StrategyFactory()
-            .registerTransformAxis("xml", XmlExportAxis::new)
-            .registerTransformAxis("json", JsonExportAxis::new)
-            .registerCompressionAxis("zip", zipCompressionAxis::new)
+            .registerTransformAxis("xml", () -> new LoggingTransformDecorator(
+                    new XmlExportAxis()
+            ))
+            .registerTransformAxis("json", () -> new TimeoutTransformDecorator(
+                    new RetryTransformDecorator(
+                            new LoggingTransformDecorator(
+                                    new JsonExportAxis()
+                            ),
+                            3 // Number of retry attempts
+                    ),
+                    5 // Timeout in milliseconds
+            ))
+            .registerCompressionAxis("zip", () -> new LoggingCompressionDecorator(
+                    new zipCompressionAxis()
+            ))
             .registerCompressionAxis("gzip", gzipCompressionAxis::new)
             .registerFormatAxis("prettier", PrettierPrintFormat::new);
 
     ExporterClient client = new ExporterClient(
             StrategyFactory.getTransformAxis("xml"),
-            StrategyFactory.getCompressionAxis("gzip"),
+            StrategyFactory.getCompressionAxis("zip"),
             StrategyFactory.getFormatAxis("prettier")
     );
 
@@ -28,9 +37,8 @@ void main() {
     System.out.println("Current Export Configuration: " + client.currentExportConfiguration());
 }
 
-//Create an axis to plug in new exporters (Strategy Pattern)
-//Create a factory that creates a factory of axis (Factory of Factories Pattern)
-//Create a registry to register new exporters dynamically (Registry Pattern)
+//Each core algorithm (Strategy) will have its own decorator
+//WE can decorate each strategy with additional functionalities
 
 //Axes interface
 
@@ -43,14 +51,132 @@ public interface Axis{
 }
 
 public interface TransformAxis extends Axis{
-    void Script();
 }
 public interface FormatAxis extends Axis{
-    String identation(int level);
 }
 public interface CompressionAxis extends Axis{
-    String levelOfCompression(int level);
 }
+
+//Strategy decorators
+public abstract class TransformDecorator implements TransformAxis{
+    protected final TransformAxis delegate;
+    protected TransformDecorator(TransformAxis delegate){
+        this.delegate = delegate; //Base logic
+    }
+}
+
+public abstract class CompressionDecorator implements CompressionAxis{
+    protected final CompressionAxis delegate;
+    protected CompressionDecorator(CompressionAxis delegate){
+        this.delegate = delegate; //Base logic
+    }
+}
+
+//Concrete decorators for transform axis
+public final class LoggingTransformDecorator extends TransformDecorator{
+    public LoggingTransformDecorator(TransformAxis delegate){
+        super(delegate);
+    }
+
+    @Override
+    public String Apply(String input){
+        long t0 = System.currentTimeMillis();
+        try{
+            return delegate.Apply(input);
+        } finally {
+            long t1 = System.currentTimeMillis();
+            System.out.println("Transform took " + (t1 - t0) + " ms");
+        }
+    }
+
+    @Override
+    public String type() {
+        return "Logging Decorator for " + delegate.type();
+    }
+}
+
+public final class TimeoutTransformDecorator extends TransformDecorator{
+
+    private final long timeoutMillis;
+
+    public TimeoutTransformDecorator(TransformAxis delegate, long timeoutMillis){
+        super(delegate);
+        this.timeoutMillis = timeoutMillis;
+    }
+
+    @Override
+    public String Apply(String input){
+        long startTime = System.currentTimeMillis();
+        String result = delegate.Apply(input);
+        long endTime = System.currentTimeMillis();
+        if (endTime - startTime > timeoutMillis) {
+            throw new RuntimeException("Transformation exceeded timeout of " + timeoutMillis + " ms");
+        }
+        return result;
+    }
+
+    @Override
+    public String type() {
+        return "Timeout Decorator for " + delegate.type();
+    }
+
+}
+
+public final class RetryTransformDecorator extends TransformDecorator{
+
+    private final int attempts;
+    public RetryTransformDecorator(TransformAxis delegate, int attempts){
+        super(delegate);
+        this.attempts = attempts;
+    }
+
+    @Override
+    public String Apply(String input){
+        for(int i = 0; i < attempts; i++) {
+            try {
+                return delegate.Apply(input);
+            } catch (Exception e) {
+                System.out.println("Attempt " + (i + 1) + " failed: " + e.getMessage());
+                if (i == attempts - 1) {
+                    throw e; //Rethrow after last attempt
+                }
+            } finally {
+                System.out.println("Retry attempt " + (i + 1) + " completed.");
+                System.out.println("Only " + (attempts - i - 1) + " attempts left.");
+            }
+        }
+        return null; //Should never reach here
+    }
+
+    @Override
+    public String type() {
+        return "Retry Decorator for " + delegate.type();
+    }
+}
+
+//Concrete decorators for compression axis
+public final class LoggingCompressionDecorator extends CompressionDecorator{
+    public LoggingCompressionDecorator(CompressionAxis delegate){
+        super(delegate);
+    }
+
+    @Override
+    public String Apply(String input){
+        long t0 = System.currentTimeMillis();
+        try{
+            return delegate.Apply(input);
+        } finally {
+            long t1 = System.currentTimeMillis();
+            System.out.println("Compression took " + (t1 - t0) + " ms");
+        }
+    }
+
+    @Override
+    public String type() {
+        return "Logging Decorator for " + delegate.type();
+    }
+}
+
 public static final class StrategyFactory {
 
     private static final Map<String, Supplier<Axis>> registeredAxis = new HashMap<>();
@@ -135,10 +261,6 @@ public static final class zipCompressionAxis implements CompressionAxis{
         return "Zip Compression Axis";
     }
 
-    @Override
-    public String levelOfCompression(int l) {
-        return "Level" + l + "Compression";
-    }
 }
 
 public static final class gzipCompressionAxis implements CompressionAxis{
@@ -152,10 +274,6 @@ public static final class gzipCompressionAxis implements CompressionAxis{
         return "GZip Compression Axis";
     }
 
-    @Override
-    public String levelOfCompression(int l) {
-        return "**********************" + l + "*********************";
-    }
 }
 
 //Transform strategy axis
@@ -172,22 +290,14 @@ public static final class JsonExportAxis implements TransformAxis{
         return "JSON Exporter";
     }
 
-    @Override
-    public void Script(){
-        System.out.println("Executing JSON Transformation Script...");
-    }
+
 }
 
 public static final class XmlExportAxis implements TransformAxis{
-    @Override
-    public void Script() {
-        System.out.println("Executing XML Transformation Script...");
-    }
 
     @Override
     public String Apply(String sanitizedInput) {
         //Simple XML transformation to <>
-        Script();
         beforeTransform(sanitizedInput);
         return "<data>" + afterTransform(sanitizedInput) + "</data>";
     };
@@ -219,11 +329,6 @@ public static final class PrettierPrintFormat implements FormatAxis{
         return "Prettier Print Format Axis";
     }
 
-    @Override
-    public String identation(int level) {
-        if (level <= 0) return "";
-        return "---".repeat(level); // 2 spaces per level
-    }
 }
 
 public abstract class AbstractExporter implements Exporter{
@@ -275,12 +380,11 @@ public final class ExporterClient{ //The context for the strategy
 
     public  String export(String data, int identLevel){
 
-        String identation = format.identation(identLevel);
-        String res = format.Apply(
+        return format.Apply(
                         compression.Apply(
                                 transform.Apply(data)));
 
-        return identation + res + identation;
+
     }
 
 
